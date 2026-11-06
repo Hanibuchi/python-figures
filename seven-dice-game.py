@@ -4,9 +4,8 @@
 - 赤・青のダイス（+アイテムで黄ダイス）を振り、合計が7なら「番」の人の勝ち。
 - アンラッキーナンバー（親交代ごとに3つ）or ちょうど13 なら「番」の人の負け。
 - 親はアイテムを使ったあと、今回のロールを「自分の番」にするか「相手の番」にするか選ぶ。
-  - 自分の番でハズレ → ドロー（親交代）
-  - 相手の番でハズレ → 同じ親でもう一度
-- 勝負がつくたびに親交代。負けた側はライフ-1。ライフ0で敗北。
+  - どちらの番でもハズレ → ドロー
+- 1回振るごとに（勝ち・負け・ドローいずれでも）親交代。負けた側はライフ-1。ライフ0で敗北。
 
 実行: python3 seven-dice-game.py [--seed N] [--life N]
 """
@@ -18,7 +17,6 @@ from dataclasses import dataclass, field
 
 MAX_ITEMS = 8
 UNLUCKY_COUNT = 3
-CLEAR = "\n" * 60
 
 ITEMS = {
     "yellow": "黄ダイス追加",
@@ -35,8 +33,8 @@ ITEM_HELP = {
     "steal": "相手のアイテムを1つ奪う（すぐ使える）",
     "blue_hi": "今回の青ダイスを4〜6で振る",
     "red_lo": "今回の赤ダイスを1〜3で振る",
-    "flip": "振った後、選んだダイスを裏返す（x → 7-x）",
-    "peek": "振った後、選んだダイス1つの出目を親だけが見る",
+    "flip": "今回を相手の番に確定し、振った後に全ダイスの出目を見てから1つ選んで裏返す（x → 7-x）",
+    "peek": "振った後、選んだダイス1つの出目を見る",
 }
 
 
@@ -52,7 +50,7 @@ class RollMods:
     yellow: int = 0
     blue_hi: bool = False
     red_lo: bool = False
-    flips: list = field(default_factory=list)  # ダイスラベル
+    flips: int = 0  # 振った後に裏返せる回数
     peeks: list = field(default_factory=list)  # ダイスラベル
 
     def dice_labels(self):
@@ -67,7 +65,7 @@ class RollMods:
         if self.red_lo:
             parts.append("赤3↓")
         if self.flips:
-            parts.append("裏返し:" + ",".join(self.flips))
+            parts.append(f"裏返し×{self.flips}（相手の番に確定）")
         if self.peeks:
             parts.append("覗き見:" + ",".join(self.peeks))
         return " / ".join(parts) if parts else "なし"
@@ -204,10 +202,8 @@ class Game:
             mods.red_lo = True
             print("  赤ダイスは1〜3で振られる")
         elif item == "flip":
-            labels = mods.dice_labels()
-            j = ask_choice("  どのダイスを裏返す？（振った後に適用）", labels)
-            mods.flips.append(labels[j])
-            print(f"  {labels[j]}を振った後に裏返す")
+            mods.flips += 1
+            print(f"  今回は{c.name}の番に確定。振った後、出目を見てからダイスを1つ裏返せる")
         elif item == "peek":
             labels = mods.dice_labels()
             j = ask_choice("  どのダイスを覗く？", labels)
@@ -222,19 +218,24 @@ class Game:
         dice["青"] = self.rng.randint(4, 6) if mods.blue_hi else self.rng.randint(1, 6)
         for i in range(mods.yellow):
             dice[f"黄{i + 1}"] = self.rng.randint(1, 6)
-        for label in mods.flips:
-            if label in dice:
-                dice[label] = 7 - dice[label]
         return dice
 
+    @staticmethod
+    def dice_str(dice):
+        return "  ".join(f"{k}:{v}" for k, v in dice.items()) + f"  (合計 {sum(dice.values())})"
+
     def peek(self, mods, dice):
-        print(CLEAR)
-        print(f"*** {self.child.name} は画面を見ないでください ***")
-        pause(f"{self.parent.name} だけが見ている状態で Enter > ")
         for label in mods.peeks:
             print(f"  [覗き見] {label}ダイス = {dice[label]}")
-        pause("確認したら Enter（画面を消します） > ")
-        print(CLEAR)
+
+    def flip(self, mods, dice):
+        for n in range(mods.flips):
+            print(f"\n  [ひっくり返す {n + 1}/{mods.flips}] 現在の出目: {self.dice_str(dice)}")
+            labels = list(dice)
+            j = ask_choice("  どのダイスを裏返す？",
+                           [f"{k}:{v} → {7 - v}" for k, v in dice.items()])
+            dice[labels[j]] = 7 - dice[labels[j]]
+            print(f"  {labels[j]}を裏返した → {self.dice_str(dice)}")
 
     def judge(self, total):
         """番の人から見た結果: 'win' / 'lose' / 'miss'"""
@@ -246,50 +247,49 @@ class Game:
 
     # --- 1回の親の手番 ---
     def play_parent_turn(self):
-        """勝負 or ドローがついたら True（親交代）、もう一度なら False。"""
         print(f"\n--- アイテム配布 ---")
         self.give_items()
         mods = self.item_phase()
 
         dice = self.roll(mods)
-        print("\n🎲 ダイスを振った（伏せたまま）")
-        if mods.peeks:
+        if mods.peeks or mods.flips:
+            print("\n🎲 ダイスを振った")
             self.peek(mods, dice)
-            self.show_status(mods)
+            self.flip(mods, dice)
+        else:
+            print("\n🎲 ダイスを振った（伏せたまま）")
 
         p, c = self.parent, self.child
-        t = ask_choice(f"{p.name}: このロールは誰の番にする？",
-                       [f"自分（{p.name}）の番", f"相手（{c.name}）の番"])
-        turn_player = p if t == 0 else c
-        other = c if t == 0 else p
+        if mods.flips:
+            turn_player, other = c, p  # ひっくり返す使用時は相手の番に確定済み
+        else:
+            t = ask_choice(f"{p.name}: このロールは誰の番にする？",
+                           [f"自分（{p.name}）の番", f"相手（{c.name}）の番"])
+            turn_player = p if t == 0 else c
+            other = c if t == 0 else p
 
         print("\n--- 公開 ---")
-        print("  " + "  ".join(f"{k}:{v}" for k, v in dice.items()))
         total = sum(dice.values())
+        print("  " + "  ".join(f"{k}:{v}" for k, v in dice.items()))
         print(f"  合計 = {total}  （{turn_player.name} の番）")
 
         result = self.judge(total)
         if result == "win":
             other.life -= 1
             print(f"  ★ {turn_player.name} の勝ち！ {other.name} のライフ -1")
-            return True
-        if result == "lose":
+        elif result == "lose":
             turn_player.life -= 1
             print(f"  ✖ {turn_player.name} の負け！ {turn_player.name} のライフ -1")
-            return True
-        if turn_player is p:
-            print("  ドロー。親が交代します。")
-            return True
-        print(f"  ハズレ。{p.name} がもう一度親を続けます。")
-        return False
+        else:
+            print("  ドロー。")
+        print(f"  親が交代します。")
 
     def run(self):
         self.initial_life = self.players[0].life
         print("7ダイス対戦ゲーム 開始！")
         while True:
             self.new_parent_phase()
-            while not self.play_parent_turn():
-                pause()
+            self.play_parent_turn()
             pause()
             losers = [p for p in self.players if p.life <= 0]
             if losers:
